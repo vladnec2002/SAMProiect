@@ -1,0 +1,2 @@
+-keep class com.squareup.moshi.** { *; }
+-keep class com.example.apptracker.data.network.** { *; }
