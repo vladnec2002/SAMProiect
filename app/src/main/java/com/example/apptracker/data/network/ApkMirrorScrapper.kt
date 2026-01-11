@@ -56,7 +56,13 @@ object ApkMirrorScraper {
                 releaseDate = details?.releaseDate,
                 developer = details?.developer,
                 downloadUrl = details?.downloadUrl ?: appPageUrl,
-                iconUrl = iconUrl
+                iconUrl = iconUrl,
+
+                // 🔽 info extra luate de pe pagina versiunii
+                description = details?.description,
+                fileSize = details?.fileSize,
+                minAndroidVersion = details?.minAndroidVersion,
+                downloads = details?.downloads
             )
 
             apps += appInfo
@@ -73,7 +79,11 @@ object ApkMirrorScraper {
         val versionName: String?,
         val releaseDate: String?,
         val developer: String?,
-        val downloadUrl: String?
+        val downloadUrl: String?,
+        val description: String?,
+        val fileSize: String?,
+        val minAndroidVersion: String?,
+        val downloads: String?
     )
 
     // funcție suspend -> poate folosi delay
@@ -87,9 +97,19 @@ object ApkMirrorScraper {
 
         // prima versiune din listă = cea mai nouă
         val firstRelease = doc.selectFirst("div.release-card")
-            ?: return VersionDetails(null, null, null, null, appPageUrl)
+            ?: return VersionDetails(null, null, null, null, appPageUrl, null, null, null, null)
 
-        val versionLink = firstRelease.selectFirst("a[href]") ?: return VersionDetails(null, null, null, null, appPageUrl)
+        val versionLink = firstRelease.selectFirst("a[href]") ?: return VersionDetails(
+            null,
+            null,
+            null,
+            null,
+            appPageUrl,
+            null,
+            null,
+            null,
+            null
+        )
         val versionPageUrl = BASE + versionLink.attr("href")
 
         return scrapeVersionPage(versionPageUrl)
@@ -137,12 +157,65 @@ object ApkMirrorScraper {
             ?.trim()
             ?.ifBlank { null }
 
+        // --------- Description (secțiunea “About <App> <version>”) ----------
+        val description = run {
+            val aboutHeader = doc.select("h3")
+                .firstOrNull { it.text().startsWith("About ") }
+
+            if (aboutHeader != null) {
+                val sb = StringBuilder()
+                var el = aboutHeader.nextElementSibling()
+
+                // colectăm text până la următorul <h3> (ex: “screenshots”, “Download” etc.)
+                while (el != null && el.tagName() != "h3") {
+                    val text = el.text().trim()
+                    if (text.isNotEmpty()) {
+                        if (sb.isNotEmpty()) sb.append("\n\n")
+                        sb.append(text)
+                    }
+                    el = el.nextElementSibling()
+                }
+
+                sb.toString().trim().ifBlank { null }
+            } else {
+                null
+            }
+        }
+
+        // --------- File size: XX MB ----------
+        val fileSize = doc.select("*")
+            .firstOrNull { it.ownText().startsWith("File size:") }
+            ?.ownText()
+            ?.removePrefix("File size:")
+            ?.trim()
+            ?.ifBlank { null }
+
+        // --------- Downloads: XX ----------
+        val downloads = doc.select("*")
+            .firstOrNull { it.ownText().startsWith("Downloads:") }
+            ?.ownText()
+            ?.removePrefix("Downloads:")
+            ?.trim()
+            ?.ifBlank { null }
+
+        // --------- Min Android version: ex. "Android 5.0+" ----------
+        val minAndroidVersion = doc.select("*")
+            .mapNotNull { el ->
+                val t = el.ownText().trim()
+                if (t.matches(Regex("Android\\s+\\d+(\\.\\d+)?\\+"))) t else null
+            }
+            .firstOrNull()
+
         return VersionDetails(
             packageName = packageName,
             versionName = versionName,
             releaseDate = releaseDate,
             developer = developer,
-            downloadUrl = url
+            downloadUrl = url,           // pagina versiunii (de aici userul poate alege varianta potrivită)
+            description = description,
+            fileSize = fileSize,
+            minAndroidVersion = minAndroidVersion,
+            downloads = downloads
         )
     }
 }

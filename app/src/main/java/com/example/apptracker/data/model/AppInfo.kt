@@ -9,5 +9,11 @@ data class AppInfo(
     val releaseDate: String? = null,
     val developer: String? = null,
     val downloadUrl: String? = null,
-    val iconUrl: String? = null
+    val iconUrl: String? = null,
+
+    // 🔽 Nou: info extra, folosite în special pentru APKMirror
+    val description: String? = null,          // textul "About ..." + descriere aplicație
+    val fileSize: String? = null,             // ex: "23.46 MB"
+    val minAndroidVersion: String? = null,    // ex: "Android 5.0+"
+    val downloads: String? = null             // ex: "11"
 )

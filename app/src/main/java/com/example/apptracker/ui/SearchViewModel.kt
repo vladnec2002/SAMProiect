@@ -14,7 +14,8 @@ data class SearchState(
     val query: String = "",
     val loading: Boolean = false,
     val results: List<AppInfo> = emptyList(),
-    val error: String? = null
+    val error: String? = null,
+    val selectedApp: AppInfo? = null   // 🔹 nou: app-ul selectat pentru pagina de detalii
 )
 
 @HiltViewModel
@@ -37,7 +38,7 @@ class SearchViewModel @Inject constructor(
         viewModelScope.launch {
             runCatching { repo.search(q) }
                 .onSuccess { newResults ->
-                    // 🔹 Adaugă peste ce există deja, nu le șterge
+                    // 🔹 momentan păstrăm comportamentul tău de "append"
                     val combined = _state.value.results + newResults
                     _state.value = _state.value.copy(
                         loading = false,
@@ -54,6 +55,19 @@ class SearchViewModel @Inject constructor(
     }
 
     fun clearResults() {
-        _state.value = _state.value.copy(results = emptyList())
+        _state.value = _state.value.copy(
+            results = emptyList(),
+            selectedApp = null
+        )
+    }
+
+    // 🔹 selectăm un app pentru pagina de detaliu
+    fun selectApp(app: AppInfo) {
+        _state.value = _state.value.copy(selectedApp = app)
+    }
+
+    // 🔹 închidem pagina de detaliu
+    fun closeDetails() {
+        _state.value = _state.value.copy(selectedApp = null)
     }
 }

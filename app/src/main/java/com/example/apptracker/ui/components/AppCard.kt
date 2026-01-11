@@ -13,7 +13,7 @@ import coil.compose.AsyncImage
 import com.example.apptracker.data.model.AppInfo
 
 @Composable
-fun AppCard(item: AppInfo, onOpen: (String) -> Unit) {
+fun AppCard(item: AppInfo, onClick: (AppInfo) -> Unit) {
 
     val versionText = "${item.versionName ?: "-"} (${item.versionCode ?: "-"})"
 
@@ -21,7 +21,7 @@ fun AppCard(item: AppInfo, onOpen: (String) -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp)
-            .clickable { item.downloadUrl?.let(onOpen) }
+            .clickable { onClick(item) }
     ) {
         Column(Modifier.padding(12.dp)) {
 
@@ -59,38 +59,46 @@ fun AppCard(item: AppInfo, onOpen: (String) -> Unit) {
 
             Spacer(Modifier.height(8.dp))
 
-            // toate câmpurile din AppInfo, pe rânduri separate
+            if (item.source == "APKMirror") {
+                // 🔹 Pentru APKMirror: vrem card simplu -> doar versiunea
+                Text(
+                    text = "Versiune: $versionText",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                // 🔹 Pentru F-Droid (sau alte surse): afișăm toate câmpurile, ca înainte
 
-            Text(
-                text = "Versiune: $versionText",
-                style = MaterialTheme.typography.bodySmall
-            )
+                Text(
+                    text = "Versiune: $versionText",
+                    style = MaterialTheme.typography.bodySmall
+                )
 
-            Text(
-                text = "Developer: ${item.developer ?: "-"}",
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+                Text(
+                    text = "Developer: ${item.developer ?: "-"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
 
-            Text(
-                text = "Release date: ${item.releaseDate ?: "-"}",
-                style = MaterialTheme.typography.bodySmall
-            )
+                Text(
+                    text = "Release date: ${item.releaseDate ?: "-"}",
+                    style = MaterialTheme.typography.bodySmall
+                )
 
-            Text(
-                text = "Download: ${item.downloadUrl ?: "-"}",
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+                Text(
+                    text = "Download: ${item.downloadUrl ?: "-"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
 
-            Text(
-                text = "Icon URL: ${item.iconUrl ?: "-"}",
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+                Text(
+                    text = "Icon URL: ${item.iconUrl ?: "-"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

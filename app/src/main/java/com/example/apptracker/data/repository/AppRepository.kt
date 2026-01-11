@@ -63,7 +63,8 @@ class AppRepositoryImpl @Inject constructor(
                         ?.firstOrNull()
                     val iconUrl = iconFile?.name?.let { "https://f-droid.org/repo/$it" }
 
-                    // ---------- versiune din index-v2 (dacă există) ----------
+                    // ---------- versiune + dată din index-v2 (dacă există) ----------
+                    var bestVersionCode: Long? = null
                     var versionName: String? = null
                     var versionCode: Int? = null
                     var releaseDate: String? = null
@@ -74,10 +75,11 @@ class AppRepositoryImpl @Inject constructor(
                         .maxByOrNull { it.versionCode!! }
 
                     if (latestFromIndex != null) {
+                        bestVersionCode = latestFromIndex.versionCode
                         versionName = latestFromIndex.versionName
                         versionCode = latestFromIndex.versionCode?.toInt()
 
-                        // "added" poate fi secunde sau milisecunde
+                        // "added" poate fi secunde sau milisecunde -> formatăm la yyyy-MM-dd
                         releaseDate = latestFromIndex.added?.let { ts ->
                             val millis = if (ts < 1_000_000_000_000L) ts * 1000 else ts
                             val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
@@ -85,29 +87,38 @@ class AppRepositoryImpl @Inject constructor(
                         }
                     }
 
-                    // ---------- fallback: API oficial /api/v1/packages/{id} ----------
-                    if (versionName == null && versionCode == null) {
-                        runCatching {
-                            val appInfo = fdroid.getApp(pkgName)
-                            val latestApi = appInfo.packages
-                                .filter { it.versionCode != null }
-                                .maxByOrNull { it.versionCode!! }
+                    // ---------- completăm/verificăm cu API-ul oficial /api/v1/packages/{id} ----------
+                    runCatching {
+                        val appInfo = fdroid.getApp(pkgName)
 
-                            versionName = latestApi?.versionName
-                            versionCode = latestApi?.versionCode?.toInt()
-                        }.onFailure {
-                            Log.e("FDROID", "getApp($pkgName) failed: ${it.message}", it)
+                        val latestApi = appInfo.packages
+                            .filter { it.versionCode != null }
+                            .maxByOrNull { it.versionCode!! }
+
+                        if (latestApi != null) {
+                            // dacă API-ul are o versiune mai nouă sau nu aveam versiune
+                            if (bestVersionCode == null || latestApi.versionCode!! >= bestVersionCode!!) {
+                                bestVersionCode = latestApi.versionCode
+                                versionCode = latestApi.versionCode?.toInt()
+                                // păstrăm numele versiunii de la API dacă există
+                                if (!latestApi.versionName.isNullOrBlank()) {
+                                    versionName = latestApi.versionName
+                                }
+                                // API-ul nu dă release date -> păstrăm ce avem din index, dacă există
+                            }
                         }
+                    }.onFailure {
+                        Log.e("FDROID", "getApp($pkgName) failed: ${it.message}", it)
                     }
 
                     val info = AppInfo(
                         source = "F-Droid",
                         packageName = pkgName,
                         appName = appName,
-                        versionName = versionName,
-                        versionCode = versionCode,
-                        releaseDate = releaseDate,
-                        developer = meta.authorName,
+                        versionName = versionName,      // cât mai complet
+                        versionCode = versionCode,      // cel mai mare versionCode găsit
+                        releaseDate = releaseDate,      // din index.v2 (added)
+                        developer = meta.authorName,    // numele developer-ului
                         downloadUrl = "https://f-droid.org/en/packages/$pkgName/",
                         iconUrl = iconUrl
                     )
@@ -115,6 +126,7 @@ class AppRepositoryImpl @Inject constructor(
                     fdroidResults += info
                     if (fdroidResults.size >= 10) break
                 }
+
 
                 out += fdroidResults
                 Log.d(
@@ -143,7 +155,10 @@ class AppRepositoryImpl @Inject constructor(
 
             Log.d("SEARCH", "Final result count: ${finalResults.size}")
             finalResults.forEach {
-                Log.d("SEARCH", "Result: [${it.source}] ${it.appName} (${it.packageName}) v=${it.versionName}/${it.versionCode} rel=${it.releaseDate}")
+                Log.d(
+                    "SEARCH",
+                    "Result: [${it.source}] ${it.appName} (${it.packageName}) v=${it.versionName}/${it.versionCode} rel=${it.releaseDate}"
+                )
             }
 
             finalResults
