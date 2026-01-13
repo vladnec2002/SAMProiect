@@ -48,9 +48,9 @@ class AppRepositoryImpl @Inject constructor(
             .format(Date(millis))
     }
 
-    // =========================
-    // SEARCH (LITE)
-    // =========================
+    // ========================
+    // SEARCH (lite)
+    // ========================
     override suspend fun searchLite(term: String, limit: Int): List<AppInfo> =
         withContext(Dispatchers.IO) {
 
@@ -85,30 +85,42 @@ class AppRepositoryImpl @Inject constructor(
                     val iconFile = meta.icon?.values?.firstOrNull()
                     val iconUrl = iconFile?.name?.let { "https://f-droid.org/repo/$it" }
 
-                    // release date + fallback version din index
+                    // fallback (din index) pentru versiune + release date
                     val latestFromIndex = entry.versions.values
                         .filter { it.versionCode != null }
                         .maxByOrNull { it.versionCode!! }
 
-                    val releaseDate = latestFromIndex?.added?.let(::formatDate)
-
-                    // versiune din API per-app (mai corect)
+                    // versiune din API per-app (mai corect): încercăm suggestedVersionCode, apoi max(versionCode)
+                    var chosenApiVersionCode: Long? = null
                     var versionName: String? = null
                     var versionCode: Int? = null
 
                     runCatching {
                         val app = fdroid.getApp(pkg)
-                        val latestApi = app.packages
-                            .filter { it.versionCode != null }
-                            .maxByOrNull { it.versionCode!! }
 
-                        versionName = latestApi?.versionName
-                        versionCode = latestApi?.versionCode?.toInt()
+                        val suggested = app.suggestedVersionCode
+                        val chosen = app.packages.firstOrNull { it.versionCode != null && it.versionCode == suggested }
+                            ?: app.packages
+                                .filter { it.versionCode != null }
+                                .maxByOrNull { it.versionCode!! }
+
+                        chosenApiVersionCode = chosen?.versionCode
+                        versionName = chosen?.versionName
+                        versionCode = chosen?.versionCode?.toInt()
                     }.onFailure {
+                        // fallback la index dacă API eșuează
                         versionName = latestFromIndex?.versionName
                         versionCode = latestFromIndex?.versionCode?.toInt()
                         Log.w("FDROID", "getApp($pkg) failed, fallback to index")
                     }
+
+                    // release date: preferăm versiunea aleasă de API (suggested), mapată în index-v2 via "added"
+                    val releaseDate =
+                        chosenApiVersionCode
+                            ?.toString()
+                            ?.let { key -> entry.versions[key]?.added }
+                            ?.let(::formatDate)
+                            ?: latestFromIndex?.added?.let(::formatDate)
 
                     results += AppInfo(
                         source = "F-Droid",
@@ -138,12 +150,13 @@ class AppRepositoryImpl @Inject constructor(
                 Log.e("APKMIRROR", "Search failed", it)
             }
 
-            out.distinctBy(::keyOf)
+            // dedup + limit
+            out.distinctBy { keyOf(it) }.take(limit)
         }
 
-    // =========================
-    // LOAD DETAILS (CLICK)
-    // =========================
+    // ========================
+    // LOAD DETAILS (heavy)
+    // ========================
     override suspend fun loadDetails(item: AppInfo): AppInfo =
         withContext(Dispatchers.IO) {
 
@@ -159,7 +172,9 @@ class AppRepositoryImpl @Inject constructor(
 
                     val details = runCatching {
                         ApkMirrorScraper.loadDetailsSmart(url)
-                    }.getOrNull() ?: return@withContext item
+                    }.getOrNull()
+
+                    if (details == null) return@withContext item
 
                     item.copy(
                         packageName = details.packageName.ifBlank { item.packageName },
