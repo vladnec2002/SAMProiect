@@ -6,14 +6,18 @@ data class AppInfo(
     val appName: String,
     val versionName: String? = null,
     val versionCode: Int? = null,
+
+    // folosit pe toate sursele (poate rămâne null)
     val releaseDate: String? = null,
+
     val developer: String? = null,
     val downloadUrl: String? = null,
     val iconUrl: String? = null,
 
-    // 🔽 Nou: info extra, folosite în special pentru APKMirror
-    val description: String? = null,          // textul "About ..." + descriere aplicație
-    val fileSize: String? = null,             // ex: "23.46 MB"
-    val minAndroidVersion: String? = null,    // ex: "Android 5.0+"
-    val downloads: String? = null             // ex: "11"
+    // ✅ NOU: din APKMirror search list
+    val lastUpdated: String? = null,
+
+    // ✅ NOU: din APKMirror details (version page)
+    val minAndroid: String? = null,
+    val architecture: String? = null
 )

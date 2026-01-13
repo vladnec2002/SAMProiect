@@ -4,7 +4,10 @@ import android.util.Log
 import com.example.apptracker.data.model.AppInfo
 import com.example.apptracker.data.network.ApkMirrorScraper
 import com.example.apptracker.data.network.FdroidApiService
+import com.example.apptracker.data.network.FdroidIndex
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -13,7 +16,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 interface AppRepository {
-    suspend fun search(termOrPackage: String): List<AppInfo>
+    suspend fun searchLite(term: String, limit: Int = 20): List<AppInfo>
+    suspend fun loadDetails(item: AppInfo): AppInfo
 }
 
 @Singleton
@@ -21,146 +25,154 @@ class AppRepositoryImpl @Inject constructor(
     private val fdroid: FdroidApiService
 ) : AppRepository {
 
-    override suspend fun search(termOrPackage: String): List<AppInfo> =
-        withContext(Dispatchers.IO) {
-            val out = mutableListOf<AppInfo>()
-            val query = termOrPackage.trim()
+    // =========================
+    // FDROID INDEX CACHE
+    // =========================
+    private val indexMutex = Mutex()
+    private var cachedIndex: FdroidIndex? = null
 
+    private suspend fun getIndexCached(): FdroidIndex =
+        indexMutex.withLock {
+            cachedIndex ?: fdroid.getIndex().also { cachedIndex = it }
+        }
+
+    // =========================
+    // HELPERS
+    // =========================
+    private fun keyOf(item: AppInfo): String =
+        "${item.source}:${if (item.packageName.isNotBlank()) item.packageName else (item.downloadUrl ?: item.appName)}"
+
+    private fun formatDate(ts: Long): String {
+        val millis = if (ts < 1_000_000_000_000L) ts * 1000 else ts
+        return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+            .format(Date(millis))
+    }
+
+    // =========================
+    // SEARCH (LITE)
+    // =========================
+    override suspend fun searchLite(term: String, limit: Int): List<AppInfo> =
+        withContext(Dispatchers.IO) {
+
+            val query = term.trim()
             if (query.isEmpty()) return@withContext emptyList()
 
-            Log.d("SEARCH", "Search started for: $query")
+            val lower = query.lowercase()
+            val out = mutableListOf<AppInfo>()
 
-            // 1️⃣ --- F-Droid search (index-v2 + API per-app pentru versiune) ---
+            // ---------- F-DROID ----------
             runCatching {
-                Log.d("FDROID", "Loading index-v2.json...")
-                val index = fdroid.getIndex()
-                val lower = query.lowercase()
+                val index = getIndexCached()
+                val results = mutableListOf<AppInfo>()
 
-                val fdroidResults = mutableListOf<AppInfo>()
+                for ((pkg, entry) in index.packages) {
+                    val meta = entry.metadata ?: continue
 
-                // mergem cu for ca să putem apela suspend fdroid.getApp()
-                for ((pkgName, pkgEntry) in index.packages.entries) {
-                    val meta = pkgEntry.metadata ?: continue
-
-                    // nume localizat: încearcă en-US, apoi orice non-gol
                     val appName = meta.name
-                        ?.let { map ->
-                            map["en-US"]
-                                ?.takeIf { it.isNotBlank() }
-                                ?: map.values.firstOrNull { it.isNotBlank() }
+                        ?.let { m ->
+                            m["en-US"]?.takeIf { it.isNotBlank() }
+                                ?: m.values.firstOrNull { it.isNotBlank() }
                         }
-                        ?: pkgName
+                        ?: pkg
 
-                    // filtru după nume sau package
-                    val matches = pkgName.contains(lower, ignoreCase = true) ||
-                            appName.contains(lower, ignoreCase = true)
+                    val matches =
+                        pkg.contains(lower, true) ||
+                                appName.contains(lower, true)
 
                     if (!matches) continue
 
-                    // icon: ia primul icon și îl transformă în URL complet
-                    val iconFile = meta.icon
-                        ?.values
-                        ?.firstOrNull()
+                    // icon
+                    val iconFile = meta.icon?.values?.firstOrNull()
                     val iconUrl = iconFile?.name?.let { "https://f-droid.org/repo/$it" }
 
-                    // ---------- versiune + dată din index-v2 (dacă există) ----------
-                    var bestVersionCode: Long? = null
-                    var versionName: String? = null
-                    var versionCode: Int? = null
-                    var releaseDate: String? = null
-
-                    val latestFromIndex = pkgEntry.versions
-                        .values
+                    // release date + fallback version din index
+                    val latestFromIndex = entry.versions.values
                         .filter { it.versionCode != null }
                         .maxByOrNull { it.versionCode!! }
 
-                    if (latestFromIndex != null) {
-                        bestVersionCode = latestFromIndex.versionCode
-                        versionName = latestFromIndex.versionName
-                        versionCode = latestFromIndex.versionCode?.toInt()
+                    val releaseDate = latestFromIndex?.added?.let(::formatDate)
 
-                        // "added" poate fi secunde sau milisecunde -> formatăm la yyyy-MM-dd
-                        releaseDate = latestFromIndex.added?.let { ts ->
-                            val millis = if (ts < 1_000_000_000_000L) ts * 1000 else ts
-                            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-                            fmt.format(Date(millis))
-                        }
-                    }
+                    // versiune din API per-app (mai corect)
+                    var versionName: String? = null
+                    var versionCode: Int? = null
 
-                    // ---------- completăm/verificăm cu API-ul oficial /api/v1/packages/{id} ----------
                     runCatching {
-                        val appInfo = fdroid.getApp(pkgName)
-
-                        val latestApi = appInfo.packages
+                        val app = fdroid.getApp(pkg)
+                        val latestApi = app.packages
                             .filter { it.versionCode != null }
                             .maxByOrNull { it.versionCode!! }
 
-                        if (latestApi != null) {
-                            // dacă API-ul are o versiune mai nouă sau nu aveam versiune
-                            if (bestVersionCode == null || latestApi.versionCode!! >= bestVersionCode!!) {
-                                bestVersionCode = latestApi.versionCode
-                                versionCode = latestApi.versionCode?.toInt()
-                                // păstrăm numele versiunii de la API dacă există
-                                if (!latestApi.versionName.isNullOrBlank()) {
-                                    versionName = latestApi.versionName
-                                }
-                                // API-ul nu dă release date -> păstrăm ce avem din index, dacă există
-                            }
-                        }
+                        versionName = latestApi?.versionName
+                        versionCode = latestApi?.versionCode?.toInt()
                     }.onFailure {
-                        Log.e("FDROID", "getApp($pkgName) failed: ${it.message}", it)
+                        versionName = latestFromIndex?.versionName
+                        versionCode = latestFromIndex?.versionCode?.toInt()
+                        Log.w("FDROID", "getApp($pkg) failed, fallback to index")
                     }
 
-                    val info = AppInfo(
+                    results += AppInfo(
                         source = "F-Droid",
-                        packageName = pkgName,
+                        packageName = pkg,
                         appName = appName,
-                        versionName = versionName,      // cât mai complet
-                        versionCode = versionCode,      // cel mai mare versionCode găsit
-                        releaseDate = releaseDate,      // din index.v2 (added)
-                        developer = meta.authorName,    // numele developer-ului
-                        downloadUrl = "https://f-droid.org/en/packages/$pkgName/",
+                        versionName = versionName,
+                        versionCode = versionCode,
+                        releaseDate = releaseDate,
+                        developer = meta.authorName,
+                        downloadUrl = "https://f-droid.org/en/packages/$pkg/",
                         iconUrl = iconUrl
                     )
 
-                    fdroidResults += info
-                    if (fdroidResults.size >= 10) break
+                    if (results.size >= limit) break
                 }
 
-
-                out += fdroidResults
-                Log.d(
-                    "FDROID",
-                    "F-Droid results added: ${fdroidResults.size}, total now: ${out.size}"
-                )
+                out += results
             }.onFailure {
-                Log.e("FDROID", "index-v2.json failed: ${it.message}", it)
+                Log.e("FDROID", "Search failed", it)
             }
 
-            // 2️⃣ --- APKMirror scraper (clean results) ---
+            // ---------- APKMIRROR ----------
             runCatching {
-                Log.d("APKMIRROR", "Searching APKMirror for: $query")
-                val mirrorResults = ApkMirrorScraper.searchByName(query)
-                out += mirrorResults
-                Log.d("APKMIRROR", "APKMirror results: ${mirrorResults.size}")
+                val mirror = ApkMirrorScraper.searchByNameLite(query)
+                out += mirror.take(limit)
             }.onFailure {
-                Log.e("APKMIRROR", "Error scraping: ${it.message}", it)
+                Log.e("APKMIRROR", "Search failed", it)
             }
 
-            // 3️⃣ --- Distinct & log ---
-            val finalResults = out.distinctBy {
-                // deduplicare după sursă + packageName (sau appName dacă package e gol)
-                "${it.source}:${if (it.packageName.isNotBlank()) it.packageName else it.appName.lowercase()}"
-            }
+            out.distinctBy(::keyOf)
+        }
 
-            Log.d("SEARCH", "Final result count: ${finalResults.size}")
-            finalResults.forEach {
-                Log.d(
-                    "SEARCH",
-                    "Result: [${it.source}] ${it.appName} (${it.packageName}) v=${it.versionName}/${it.versionCode} rel=${it.releaseDate}"
-                )
-            }
+    // =========================
+    // LOAD DETAILS (CLICK)
+    // =========================
+    override suspend fun loadDetails(item: AppInfo): AppInfo =
+        withContext(Dispatchers.IO) {
 
-            finalResults
+            when (item.source) {
+
+                "F-Droid" -> {
+                    // deja avem toate datele relevante
+                    item
+                }
+
+                "APKMirror" -> {
+                    val url = item.downloadUrl ?: return@withContext item
+
+                    val details = runCatching {
+                        ApkMirrorScraper.loadDetailsSmart(url)
+                    }.getOrNull() ?: return@withContext item
+
+                    item.copy(
+                        packageName = details.packageName.ifBlank { item.packageName },
+                        versionName = details.versionName ?: item.versionName,
+                        releaseDate = details.releaseDate ?: item.releaseDate,
+                        developer = details.developer ?: item.developer,
+                        downloadUrl = details.downloadUrl ?: item.downloadUrl,
+                        minAndroid = details.minAndroid ?: item.minAndroid,
+                        architecture = details.architecture ?: item.architecture
+                    )
+                }
+
+                else -> item
+            }
         }
 }

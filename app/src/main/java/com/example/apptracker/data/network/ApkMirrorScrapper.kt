@@ -5,217 +5,244 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 object ApkMirrorScraper {
 
     private const val BASE = "https://www.apkmirror.com"
     private const val USER_AGENT = "AppTracker/1.0"
-    private const val SEARCH_DELAY = 2500L
-    private const val PAGE_DELAY = 1200L
+    private const val SEARCH_DELAY = 1200L
+    private const val PAGE_DELAY = 900L
 
-    suspend fun searchByName(query: String): List<AppInfo> = withContext(Dispatchers.IO) {
+    // prinde versiuni gen: 1.2 / 1.2.3 / 10.0.1 etc.
+    private val VERSION_REGEX = Regex("""(\d+(?:\.\d+)+)\s*$""")
 
-        // mic delay între request-uri de search
-        delay(SEARCH_DELAY)
+    // =========================
+    // SEARCH LITE (RAPID)
+    // =========================
+    suspend fun searchByNameLite(query: String): List<AppInfo> =
+        withContext(Dispatchers.IO) {
 
-        val q = URLEncoder.encode(query, "UTF-8")
-        val url = "$BASE/?s=$q&post_type=app"
+            delay(SEARCH_DELAY)
 
-        val doc = Jsoup.connect(url)
-            .userAgent(USER_AGENT)
-            .timeout(15000)
-            .get()
+            val q = URLEncoder.encode(query, "UTF-8")
+            val url = "$BASE/?s=$q&post_type=app"
 
-        val mainContent = doc.selectFirst("div#content") ?: doc
-        val cards = mainContent.select("div.appRow")
+            val doc = Jsoup.connect(url)
+                .userAgent(USER_AGENT)
+                .timeout(15_000)
+                .get()
 
-        val apps = mutableListOf<AppInfo>()
+            val mainContent = doc.selectFirst("div#content") ?: doc
+            val rows = mainContent.select("div.appRow")
 
-        // folosim for, nu mapNotNull, ca să putem apela funcții suspend
-        for (el in cards) {
-            val titleEl = el.selectFirst(".appRowTitle") ?: continue
-            val linkEl = el.selectFirst("a[href*=/apk/]") ?: continue
-            val iconEl = el.selectFirst("img")
+            val apps = mutableListOf<AppInfo>()
 
-            val appName = titleEl.text().trim()
+            for (row in rows) {
+                val titleEl = row.selectFirst(".appRowTitle") ?: continue
+                val linkEl = row.selectFirst("a[href*=/apk/]") ?: continue
+                val iconEl = row.selectFirst("img")
 
-            // link către pagina aplicației (nu către o versiune anume)
-            val appPageUrl = BASE + linkEl.attr("href").substringBefore("?")
-            val iconUrl = iconEl?.absUrl("src")
+                // Exemplu: "Subway Surfers 3.57.1"
+                val titleText = titleEl.text().trim()
+                val iconUrl = iconEl?.absUrl("src")
 
-            // luăm detalii pentru cea mai nouă versiune
-            val details = runCatching { getLatestVersionDetails(appPageUrl) }.getOrNull()
+                val href = linkEl.attr("href").substringBefore("?")
+                val pageUrl = if (href.startsWith("http")) href else BASE + href
 
-            val appInfo = AppInfo(
-                source = "APKMirror",
-                appName = appName,
-                packageName = details?.packageName ?: "",
-                versionName = details?.versionName,
-                versionCode = null,  // am putea obține și aici, dar e un pas în plus
-                releaseDate = details?.releaseDate,
-                developer = details?.developer,
-                downloadUrl = details?.downloadUrl ?: appPageUrl,
-                iconUrl = iconUrl,
+                // 🔹 developer este PE ALT RÂND: "by SYBO Games"
+                val developer = row
+                    .select("span, small, div, a")
+                    .firstOrNull { it.text().trim().startsWith("by ", ignoreCase = true) }
+                    ?.text()
+                    ?.removePrefix("by")
+                    ?.trim()
+                    ?.ifBlank { null }
 
-                // 🔽 info extra luate de pe pagina versiunii
-                description = details?.description,
-                fileSize = details?.fileSize,
-                minAndroidVersion = details?.minAndroidVersion,
-                downloads = details?.downloads
-            )
+                // 🔹 versiunea din finalul titlului
+                val versionMatch = VERSION_REGEX.find(titleText)
+                val versionName = versionMatch?.groupValues?.getOrNull(1)
 
-            apps += appInfo
+                val appName = if (versionName != null) {
+                    titleText.removeSuffix(versionName).trim()
+                } else {
+                    titleText
+                }
+
+                val lastUpdated = normalizeLastUpdated(extractLastUpdated(row))
+
+                apps += AppInfo(
+                    source = "APKMirror",
+                    packageName = "",
+                    appName = appName,
+                    versionName = versionName,
+                    developer = developer,
+                    downloadUrl = pageUrl,
+                    iconUrl = iconUrl,
+                    lastUpdated = lastUpdated
+                )
+            }
+
+            apps.distinctBy {
+                "${it.appName.lowercase()}:${it.versionName ?: ""}:${it.developer ?: ""}"
+            }
         }
 
-        // eliminăm duplicatele după nume de aplicație
-        apps.distinctBy { it.appName.lowercase() }
-    }
+    // =========================
+    // LOAD DETAILS (CLICK)
+    // =========================
+    suspend fun loadDetailsSmart(url: String): AppInfo? =
+        withContext(Dispatchers.IO) {
 
-    // ------------------ STEP 2: GET LATEST VERSION FROM APP PAGE ------------------
+            // 1️⃣ încearcă direct ca version page
+            val direct = runCatching { scrapeVersionPage(url) }.getOrNull()
+            if (direct != null && (
+                        direct.packageName != null ||
+                                direct.versionName != null ||
+                                direct.minAndroid != null
+                        )
+            ) {
+                return@withContext AppInfo(
+                    source = "APKMirror",
+                    packageName = direct.packageName ?: "",
+                    appName = "",
+                    versionName = direct.versionName,
+                    releaseDate = direct.releaseDate,
+                    developer = direct.developer,
+                    downloadUrl = url,
+                    minAndroid = direct.minAndroid,
+                    architecture = direct.architecture
+                )
+            }
 
+            // 2️⃣ fallback: app page → latest version
+            val latest = runCatching { getLatestVersionDetails(url) }.getOrNull()
+                ?: return@withContext null
+
+            AppInfo(
+                source = "APKMirror",
+                packageName = latest.packageName ?: "",
+                appName = "",
+                versionName = latest.versionName,
+                releaseDate = latest.releaseDate,
+                developer = latest.developer,
+                downloadUrl = latest.downloadUrl ?: url,
+                minAndroid = latest.minAndroid,
+                architecture = latest.architecture
+            )
+        }
+
+    // =========================
+    // INTERNAL SCRAPING
+    // =========================
     private data class VersionDetails(
         val packageName: String?,
         val versionName: String?,
         val releaseDate: String?,
         val developer: String?,
         val downloadUrl: String?,
-        val description: String?,
-        val fileSize: String?,
-        val minAndroidVersion: String?,
-        val downloads: String?
+        val minAndroid: String?,
+        val architecture: String?
     )
 
-    // funcție suspend -> poate folosi delay
     private suspend fun getLatestVersionDetails(appPageUrl: String): VersionDetails {
         delay(PAGE_DELAY)
 
         val doc = Jsoup.connect(appPageUrl)
             .userAgent(USER_AGENT)
-            .timeout(15000)
+            .timeout(15_000)
             .get()
 
-        // prima versiune din listă = cea mai nouă
         val firstRelease = doc.selectFirst("div.release-card")
-            ?: return VersionDetails(null, null, null, null, appPageUrl, null, null, null, null)
+            ?: return VersionDetails(null, null, null, null, appPageUrl, null, null)
 
-        val versionLink = firstRelease.selectFirst("a[href]") ?: return VersionDetails(
-            null,
-            null,
-            null,
-            null,
-            appPageUrl,
-            null,
-            null,
-            null,
-            null
-        )
-        val versionPageUrl = BASE + versionLink.attr("href")
+        val link = firstRelease.selectFirst("a[href]")
+            ?: return VersionDetails(null, null, null, null, appPageUrl, null, null)
 
+        val versionPageUrl = BASE + link.attr("href")
         return scrapeVersionPage(versionPageUrl)
     }
 
-    // ------------------ STEP 3: SCRAPE VERSION PAGE ------------------
-
-    // tot suspend, deci poate folosi delay
     private suspend fun scrapeVersionPage(url: String): VersionDetails {
         delay(PAGE_DELAY)
 
         val doc = Jsoup.connect(url)
             .userAgent(USER_AGENT)
-            .timeout(15000)
+            .timeout(15_000)
             .get()
 
-        // Version: 5.261.0
         val versionName = doc.select("span.info")
             .firstOrNull { it.text().startsWith("Version:") }
             ?.text()
             ?.removePrefix("Version:")
             ?.trim()
-            ?.ifBlank { null }
 
-        // Package: com.duckduckgo.mobile.android
-        val packageName = doc.select("div.appspec-row")
-            .firstOrNull { row -> row.selectFirst(".appspec-label")?.text() == "Package:" }
-            ?.selectFirst(".appspec-value")
-            ?.text()
-            ?.trim()
-            ?.ifBlank { null }
+        val packageName = findSpec(doc, "Package:")
+        val developer = doc.select("a[href*=/developer/]").firstOrNull()?.text()?.trim()
 
-        // Uploaded: January 5, 2026 at ...
-        val releaseDate = doc.select("div.dates-dl span")
+        val uploaded = doc.select("div.dates-dl span")
             .firstOrNull { it.text().startsWith("Uploaded:") }
             ?.text()
             ?.removePrefix("Uploaded:")
             ?.trim()
-            ?.ifBlank { null }
 
-        // Developer (By <name> / link developer)
-        val developer = doc.select("a[href*=/developer/]")
-            .firstOrNull()
-            ?.text()
-            ?.trim()
-            ?.ifBlank { null }
-
-        // --------- Description (secțiunea “About <App> <version>”) ----------
-        val description = run {
-            val aboutHeader = doc.select("h3")
-                .firstOrNull { it.text().startsWith("About ") }
-
-            if (aboutHeader != null) {
-                val sb = StringBuilder()
-                var el = aboutHeader.nextElementSibling()
-
-                // colectăm text până la următorul <h3> (ex: “screenshots”, “Download” etc.)
-                while (el != null && el.tagName() != "h3") {
-                    val text = el.text().trim()
-                    if (text.isNotEmpty()) {
-                        if (sb.isNotEmpty()) sb.append("\n\n")
-                        sb.append(text)
-                    }
-                    el = el.nextElementSibling()
-                }
-
-                sb.toString().trim().ifBlank { null }
-            } else {
-                null
-            }
-        }
-
-        // --------- File size: XX MB ----------
-        val fileSize = doc.select("*")
-            .firstOrNull { it.ownText().startsWith("File size:") }
-            ?.ownText()
-            ?.removePrefix("File size:")
-            ?.trim()
-            ?.ifBlank { null }
-
-        // --------- Downloads: XX ----------
-        val downloads = doc.select("*")
-            .firstOrNull { it.ownText().startsWith("Downloads:") }
-            ?.ownText()
-            ?.removePrefix("Downloads:")
-            ?.trim()
-            ?.ifBlank { null }
-
-        // --------- Min Android version: ex. "Android 5.0+" ----------
-        val minAndroidVersion = doc.select("*")
-            .mapNotNull { el ->
-                val t = el.ownText().trim()
-                if (t.matches(Regex("Android\\s+\\d+(\\.\\d+)?\\+"))) t else null
-            }
-            .firstOrNull()
+        val minAndroid = findSpec(doc, "Requires Android:", "Min Android:")
+        val architecture = findSpec(doc, "Architecture:", "Arch:")
 
         return VersionDetails(
             packageName = packageName,
             versionName = versionName,
-            releaseDate = releaseDate,
+            releaseDate = uploaded,
             developer = developer,
-            downloadUrl = url,           // pagina versiunii (de aici userul poate alege varianta potrivită)
-            description = description,
-            fileSize = fileSize,
-            minAndroidVersion = minAndroidVersion,
-            downloads = downloads
+            downloadUrl = url,
+            minAndroid = minAndroid,
+            architecture = architecture
         )
+    }
+
+    // =========================
+    // HELPERS
+    // =========================
+    private fun extractLastUpdated(row: Element): String? {
+        // încearcă întâi selectorii “corecți”
+        val direct = row.selectFirst(".appRowDate, .appRowUpdated")
+            ?.text()
+            ?.trim()
+        if (!direct.isNullOrBlank()) return direct
+
+        // fallback: ia textul întregului row (normalizeLastUpdated va scoate doar data)
+        return row.text().trim()
+    }
+
+
+
+    private val DATE_REGEX = Regex(
+        """\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun normalizeLastUpdated(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+
+        // ia EXACT "January 12, 2026" din orice text mai lung
+        val m = DATE_REGEX.find(raw)
+        return m?.value
+    }
+
+
+
+
+    private fun findSpec(doc: Document, vararg labels: String): String? {
+        val rows = doc.select("div.appspec-row")
+        for (label in labels) {
+            val row = rows.firstOrNull {
+                it.selectFirst(".appspec-label")?.text() == label
+            }
+            val value = row?.selectFirst(".appspec-value")?.text()?.trim()
+            if (!value.isNullOrBlank()) return value
+        }
+        return null
     }
 }
