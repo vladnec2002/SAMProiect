@@ -12,7 +12,15 @@ import java.net.URLEncoder
 object ApkMirrorScraper {
 
     private const val BASE = "https://www.apkmirror.com"
-    private const val USER_AGENT = "AppTracker/1.0"
+
+    // ✅ Use a real browser UA (APKMirror often serves different HTML for bot-like UAs)
+    private const val USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+    // ✅ Optional but helpful
+    private const val ACCEPT_LANG = "en-US,en;q=0.9"
+
     private const val SEARCH_DELAY = 1200L
     private const val PAGE_DELAY = 900L
 
@@ -32,25 +40,48 @@ object ApkMirrorScraper {
 
             val doc = Jsoup.connect(url)
                 .userAgent(USER_AGENT)
-                .timeout(15_000)
+                .header("Accept-Language", ACCEPT_LANG)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header("Connection", "keep-alive")
+                .timeout(20_000)
+                .followRedirects(true)
                 .get()
 
             val mainContent = doc.selectFirst("div#content") ?: doc
-            val rows = mainContent.select("div.appRow")
+
+            // ✅ Robust: catches appRow/appRowMini and other appRow variants
+            val rows = mainContent.select("div[class*=appRow]")
 
             val apps = mutableListOf<AppInfo>()
 
             for (row in rows) {
-                val titleEl = row.selectFirst(".appRowTitle") ?: continue
-                val linkEl = row.selectFirst("a[href*=/apk/]") ?: continue
-                val iconEl = row.selectFirst("img")
 
-                // Exemplu: "Subway Surfers 3.57.1"
-                val titleText = titleEl.text().trim()
-                val iconUrl = iconEl?.absUrl("src")
+                // ✅ Title fallback
+                val titleEl =
+                    row.selectFirst(".appRowTitle")
+                        ?: row.selectFirst("h5, h4, h3")
+                        ?: row.selectFirst("a")
 
-                val href = linkEl.attr("href").substringBefore("?")
+                val titleText = titleEl?.text()?.trim().orEmpty()
+                if (titleText.isBlank()) continue
+
+                // ✅ Link fallback (prefer /apk/)
+                val linkEl =
+                    row.selectFirst("a[href*=/apk/]")
+                        ?: row.selectFirst("a[href]")
+
+                val href = linkEl?.attr("href")?.substringBefore("?").orEmpty()
+                if (href.isBlank()) continue
+
                 val pageUrl = if (href.startsWith("http")) href else BASE + href
+
+                // ✅ Icon fallback: data-src is common
+                val iconEl = row.selectFirst("img")
+                val iconUrl = when {
+                    iconEl == null -> null
+                    iconEl.hasAttr("data-src") -> iconEl.absUrl("data-src").ifBlank { null }
+                    else -> iconEl.absUrl("src").ifBlank { null }
+                }
 
                 // 🔹 developer este PE ALT RÂND: "by SYBO Games"
                 val developer = row
@@ -152,7 +183,10 @@ object ApkMirrorScraper {
 
         val doc = Jsoup.connect(appPageUrl)
             .userAgent(USER_AGENT)
-            .timeout(15_000)
+            .header("Accept-Language", ACCEPT_LANG)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .timeout(20_000)
+            .followRedirects(true)
             .get()
 
         val firstRelease = doc.selectFirst("div.release-card")
@@ -170,7 +204,10 @@ object ApkMirrorScraper {
 
         val doc = Jsoup.connect(url)
             .userAgent(USER_AGENT)
-            .timeout(15_000)
+            .header("Accept-Language", ACCEPT_LANG)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .timeout(20_000)
+            .followRedirects(true)
             .get()
 
         val versionName = doc.select("span.info")
@@ -216,8 +253,6 @@ object ApkMirrorScraper {
         return row.text().trim()
     }
 
-
-
     private val DATE_REGEX = Regex(
         """\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b""",
         RegexOption.IGNORE_CASE
@@ -230,9 +265,6 @@ object ApkMirrorScraper {
         val m = DATE_REGEX.find(raw)
         return m?.value
     }
-
-
-
 
     private fun findSpec(doc: Document, vararg labels: String): String? {
         val rows = doc.select("div.appspec-row")

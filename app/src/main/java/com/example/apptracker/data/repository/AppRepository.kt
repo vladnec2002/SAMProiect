@@ -4,7 +4,9 @@ import android.util.Log
 import com.example.apptracker.data.model.AppInfo
 import com.example.apptracker.data.network.ApkMirrorScraper
 import com.example.apptracker.data.network.FdroidApiService
+import com.example.apptracker.data.network.FdroidFile
 import com.example.apptracker.data.network.FdroidIndex
+import com.example.apptracker.data.network.FdroidVersion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -37,19 +39,64 @@ class AppRepositoryImpl @Inject constructor(
         }
 
     // =========================
-    // HELPERS
+    // HELPERS (IN THIS FILE)
     // =========================
     private fun keyOf(item: AppInfo): String =
         "${item.source}:${if (item.packageName.isNotBlank()) item.packageName else (item.downloadUrl ?: item.appName)}"
 
     private fun formatDate(ts: Long): String {
-        val millis = if (ts < 1_000_000_000_000L) ts * 1000 else ts
-        return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-            .format(Date(millis))
+        // normalize seconds vs millis
+        val millis = if (ts < 1_000_000_000_000L) ts * 1000L else ts
+        return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(millis))
+    }
+
+    private fun pickLocalized(map: Map<String, String>?, preferred: String = "en-US"): String? {
+        if (map.isNullOrEmpty()) return null
+        return map[preferred]
+            ?: map["en"]
+            ?: map.values.firstOrNull { it.isNotBlank() }
+    }
+
+    private fun pickIconFile(iconMap: Map<String, FdroidFile>?, preferred: String = "en-US"): FdroidFile? {
+        if (iconMap.isNullOrEmpty()) return null
+        return iconMap[preferred]
+            ?: iconMap["en"]
+            ?: iconMap.values.firstOrNull()
+    }
+
+    /**
+     * In index-v2.json, icon file names are sometimes:
+     * - "org.app.png" (just the filename)
+     * - "icons-640/org.app.png" (already includes folder)
+     *
+     * This handles both safely.
+     */
+    private fun fdroidIconUrl(fileName: String?): String? {
+        if (fileName.isNullOrBlank()) return null
+        return if (fileName.contains("/")) {
+            "https://f-droid.org/repo/$fileName"
+        } else {
+            "https://f-droid.org/repo/icons-640/$fileName"
+        }
+    }
+
+    /**
+     * Pick the "latest" version for *release date* using `added`.
+     * (This is what you wanted instead of "last updated".)
+     */
+    private fun latestByAdded(versions: Map<String, FdroidVersion>): Pair<String, FdroidVersion>? {
+        if (versions.isEmpty()) return null
+        val withAdded = versions.entries.filter { it.value.added != null }
+        return if (withAdded.isNotEmpty()) {
+            withAdded.maxByOrNull { it.value.added!! }?.let { it.key to it.value }
+        } else {
+            // fallback if some packages have no "added"
+            versions.entries.firstOrNull()?.let { it.key to it.value }
+        }
     }
 
     // ========================
-    // SEARCH (lite)
+    // SEARCH (lite) 10/10
     // ========================
     override suspend fun searchLite(term: String, limit: Int): List<AppInfo> =
         withContext(Dispatchers.IO) {
@@ -58,22 +105,26 @@ class AppRepositoryImpl @Inject constructor(
             if (query.isEmpty()) return@withContext emptyList()
 
             val lower = query.lowercase()
-            val out = mutableListOf<AppInfo>()
+
+            // ✅ Force 10/10 split (best when limit == 20)
+            val targetFdroid = minOf(10, limit)
+            val targetMirror = minOf(10, maxOf(0, limit - targetFdroid))
+
+            // Pull extra to survive dedup
+            val fetchFdroid = targetFdroid * 3
+            val fetchMirror = targetMirror * 3
+
+            val fdroidResults = mutableListOf<AppInfo>()
+            val mirrorResults = mutableListOf<AppInfo>()
 
             // ---------- F-DROID ----------
             runCatching {
                 val index = getIndexCached()
-                val results = mutableListOf<AppInfo>()
 
                 for ((pkg, entry) in index.packages) {
                     val meta = entry.metadata ?: continue
 
-                    val appName = meta.name
-                        ?.let { m ->
-                            m["en-US"]?.takeIf { it.isNotBlank() }
-                                ?: m.values.firstOrNull { it.isNotBlank() }
-                        }
-                        ?: pkg
+                    val appName = pickLocalized(meta.name)?.takeIf { it.isNotBlank() } ?: pkg
 
                     val matches =
                         pkg.contains(lower, true) ||
@@ -81,16 +132,17 @@ class AppRepositoryImpl @Inject constructor(
 
                     if (!matches) continue
 
-                    // icon
-                    val iconFile = meta.icon?.values?.firstOrNull()
-                    val iconUrl = iconFile?.name?.let { "https://f-droid.org/repo/$it" }
+                    // ✅ icon (prefer localized, then fallback)
+                    val iconFile = pickIconFile(meta.icon)
+                    val iconUrl = fdroidIconUrl(iconFile?.name)
 
-                    // fallback (din index) pentru versiune + release date
-                    val latestFromIndex = entry.versions.values
-                        .filter { it.versionCode != null }
-                        .maxByOrNull { it.versionCode!! }
+                    // ✅ release-date source of truth: versions[*].added (pick latest by added)
+                    val latestAddedPair = latestByAdded(entry.versions)
+                    val latestKey = latestAddedPair?.first
+                    val latestFromIndex = latestAddedPair?.second
 
-                    // versiune din API per-app (mai corect): încercăm suggestedVersionCode, apoi max(versionCode)
+                    // Optional: use /api/v1/packages/{id} to get the suggested versionName/versionCode
+                    // (BUT note: this API does NOT give release dates, so added still comes from index-v2)
                     var chosenApiVersionCode: Long? = null
                     var versionName: String? = null
                     var versionCode: Int? = null
@@ -108,13 +160,14 @@ class AppRepositoryImpl @Inject constructor(
                         versionName = chosen?.versionName
                         versionCode = chosen?.versionCode?.toInt()
                     }.onFailure {
-                        // fallback la index dacă API eșuează
+                        // fallback to index-v2 version info
                         versionName = latestFromIndex?.versionName
                         versionCode = latestFromIndex?.versionCode?.toInt()
-                        Log.w("FDROID", "getApp($pkg) failed, fallback to index")
+                        Log.w("FDROID", "getApp($pkg) failed, fallback to index-v2")
                     }
 
-                    // release date: preferăm versiunea aleasă de API (suggested), mapată în index-v2 via "added"
+                    // ✅ RELEASE DATE FOR F-DROID:
+                    // try to match chosen versionCode -> index-v2 map key; else fallback to latest-by-added
                     val releaseDate =
                         chosenApiVersionCode
                             ?.toString()
@@ -122,36 +175,75 @@ class AppRepositoryImpl @Inject constructor(
                             ?.let(::formatDate)
                             ?: latestFromIndex?.added?.let(::formatDate)
 
-                    results += AppInfo(
+                    // If getApp chose a version but index-v2 key isn't versionCode-string, we still have
+                    // a good date fallback via latestFromIndex.added (the most recent release).
+                    fdroidResults += AppInfo(
                         source = "F-Droid",
                         packageName = pkg,
                         appName = appName,
-                        versionName = versionName,
-                        versionCode = versionCode,
-                        releaseDate = releaseDate,
+                        versionName = versionName ?: latestFromIndex?.versionName,
+                        versionCode = versionCode ?: latestFromIndex?.versionCode?.toInt(),
+                        releaseDate = releaseDate, // ✅ IMPORTANT: from "added"
                         developer = meta.authorName,
                         downloadUrl = "https://f-droid.org/en/packages/$pkg/",
                         iconUrl = iconUrl
                     )
 
-                    if (results.size >= limit) break
+                    if (fdroidResults.size >= fetchFdroid) break
                 }
-
-                out += results
             }.onFailure {
                 Log.e("FDROID", "Search failed", it)
             }
 
             // ---------- APKMIRROR ----------
             runCatching {
-                val mirror = ApkMirrorScraper.searchByNameLite(query)
-                out += mirror.take(limit)
+                mirrorResults += ApkMirrorScraper.searchByNameLite(query).take(fetchMirror)
             }.onFailure {
                 Log.e("APKMIRROR", "Search failed", it)
             }
 
-            // dedup + limit
-            out.distinctBy { keyOf(it) }.take(limit)
+            // ---------- DEDUP + EXACT PICK ----------
+            val seen = HashSet<String>(limit * 4)
+            val out = ArrayList<AppInfo>(limit)
+
+            fun addIfNew(it: AppInfo) {
+                val k = keyOf(it)
+                if (seen.add(k)) out.add(it)
+            }
+
+            // Pick EXACTLY targetFdroid from F-Droid (dedup-safe)
+            var fdCount = 0
+            for (it in fdroidResults) {
+                if (fdCount >= targetFdroid) break
+                val before = out.size
+                addIfNew(it)
+                if (out.size > before) fdCount++
+            }
+
+            // Pick EXACTLY targetMirror from APKMirror (dedup-safe)
+            var apCount = 0
+            for (it in mirrorResults) {
+                if (apCount >= targetMirror) break
+                val before = out.size
+                addIfNew(it)
+                if (out.size > before) apCount++
+            }
+
+            // If one side didn’t have enough, fill remaining slots from the other side
+            if (out.size < limit) {
+                for (it in fdroidResults) {
+                    if (out.size >= limit) break
+                    addIfNew(it)
+                }
+            }
+            if (out.size < limit) {
+                for (it in mirrorResults) {
+                    if (out.size >= limit) break
+                    addIfNew(it)
+                }
+            }
+
+            out.take(limit)
         }
 
     // ========================
@@ -163,7 +255,7 @@ class AppRepositoryImpl @Inject constructor(
             when (item.source) {
 
                 "F-Droid" -> {
-                    // deja avem toate datele relevante
+                    // already have relevant data (including releaseDate from index-v2 added)
                     item
                 }
 

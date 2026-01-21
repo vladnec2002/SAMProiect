@@ -57,7 +57,6 @@ fun AppCard(
                     Spacer(Modifier.width(8.dp))
                 }
 
-                // ✅ OPEN mereu (inclusiv pentru APKMirror / F-Droid)
                 item.downloadUrl?.let { url ->
                     TextButton(
                         onClick = { onOpen(url) },
@@ -68,16 +67,31 @@ fun AppCard(
                 }
             }
 
-            // ✅ Detalii doar când e expanded
-            // ... același header ca înainte
-
             if (expanded) {
                 Spacer(Modifier.height(8.dp))
 
-                Text(
-                    text = "Last updated: ${item.lastUpdated ?: "-"}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+                // ✅ Source-aware date labels:
+                if (item.source == "APKMirror") {
+                    Text(
+                        text = "Last updated: ${item.lastUpdated ?: "-"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "Uploaded: ${item.releaseDate ?: "-"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else if (item.source == "F-Droid") {
+                    Text(
+                        text = "Release date: ${item.releaseDate ?: "-"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    // fallback for other sources
+                    Text(
+                        text = "Date: ${item.releaseDate ?: item.lastUpdated ?: "-"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
 
                 Text(
                     text = "Versiune: ${item.versionName ?: "-"} (${item.versionCode ?: "-"})",
@@ -91,29 +105,33 @@ fun AppCard(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Text(
-                    text = "Min Android: ${item.minAndroid ?: "-"}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+                // Only meaningful for APKMirror details
+                if (item.source == "APKMirror") {
+                    Text(
+                        text = "Min Android: ${item.minAndroid ?: "-"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
 
-                Text(
-                    text = "Architecture: ${item.architecture ?: "-"}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+                    Text(
+                        text = "Architecture: ${item.architecture ?: "-"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
 
-                Text(
-                    text = "Package: ${item.packageName.ifBlank { "-" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Text(
-                    text = "Uploaded: ${item.releaseDate ?: "-"}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+                    Text(
+                        text = "Package: ${item.packageName.ifBlank { "-" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else {
+                    Text(
+                        text = "Package: ${item.packageName.ifBlank { "-" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
-
         }
     }
 }
