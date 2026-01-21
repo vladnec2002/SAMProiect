@@ -12,14 +12,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.apptracker.ui.SearchViewModel
 import com.example.apptracker.ui.components.AppCard
+import com.example.apptracker.ui.components.FullScreenDetailsDialog
 
 @Composable
 fun SearchScreen(vm: SearchViewModel) {
     val state by vm.state.collectAsState()
     val ctx = LocalContext.current
-
-    fun keyOf(source: String, pkg: String, url: String?, name: String): String =
-        "$source:${if (pkg.isNotBlank()) pkg else (url ?: name)}"
 
     Column(
         modifier = Modifier
@@ -75,15 +73,9 @@ fun SearchScreen(vm: SearchViewModel) {
             Modifier.fillMaxSize().padding(top = 12.dp)
         ) {
             items(state.results) { app ->
-                val k = keyOf(app.source, app.packageName, app.downloadUrl, app.appName)
-                val itemLoading = state.loadingKeys.contains(k)
-                val expanded = state.expandedKeys.contains(k)
-
                 AppCard(
                     item = app,
-                    loading = itemLoading,
-                    expanded = expanded,
-                    onToggleExpand = { vm.toggleExpandAndMaybeLoad(app) },
+                    onClick = { vm.openDetails(app) },
                     onOpen = { url ->
                         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                         ctx.startActivity(intent)
@@ -91,5 +83,18 @@ fun SearchScreen(vm: SearchViewModel) {
                 )
             }
         }
+    }
+
+    // ✅ Full-screen details
+    state.selected?.let { selected ->
+        FullScreenDetailsDialog(
+            item = selected,
+            loading = state.selectedLoading,
+            onDismiss = vm::closeDetails,
+            onOpen = { url ->
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                ctx.startActivity(intent)
+            }
+        )
     }
 }

@@ -17,8 +17,10 @@ data class SearchState(
     val loading: Boolean = false,
     val results: List<AppInfo> = emptyList(),
     val error: String? = null,
-    val loadingKeys: Set<String> = emptySet(),
-    val expandedKeys: Set<String> = emptySet() // ✅ pentru expand/collapse
+
+    // ✅ full screen details
+    val selected: AppInfo? = null,
+    val selectedLoading: Boolean = false
 )
 
 @HiltViewModel
@@ -35,9 +37,6 @@ class SearchViewModel @Inject constructor(
         _state.update { it.copy(query = q, error = null) }
     }
 
-    private fun keyOf(item: AppInfo): String =
-        "${item.source}:${if (item.packageName.isNotBlank()) item.packageName else (item.downloadUrl ?: item.appName)}"
-
     fun clearResults() {
         searchJob?.cancel()
         _state.update {
@@ -45,8 +44,8 @@ class SearchViewModel @Inject constructor(
                 loading = false,
                 results = emptyList(),
                 error = null,
-                loadingKeys = emptySet(),
-                expandedKeys = emptySet()
+                selected = null,
+                selectedLoading = false
             )
         }
     }
@@ -60,7 +59,7 @@ class SearchViewModel @Inject constructor(
 
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null, expandedKeys = emptySet()) }
+            _state.update { it.copy(loading = true, error = null, selected = null, selectedLoading = false) }
 
             runCatching { repo.searchLite(q, limit = 20) }
                 .onSuccess { list ->
@@ -72,50 +71,45 @@ class SearchViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Click pe card:
-     * - toggle expand/collapse
-     * - dacă se expandează și nu avem încă detalii heavy (package/releaseDate),
-     *   pornește loadDetails pentru acel item.
-     */
-    fun toggleExpandAndMaybeLoad(item: AppInfo) {
-        val k = keyOf(item)
-        val isExpanded = _state.value.expandedKeys.contains(k)
-        val newExpanded = if (isExpanded) _state.value.expandedKeys - k else _state.value.expandedKeys + k
-        _state.update { it.copy(expandedKeys = newExpanded, error = null) }
-
-        // dacă am colapsat, nu încărcăm nimic
-        if (isExpanded) return
-
-        // already heavy-loaded? (ai deja package sau releaseDate -> considerăm că avem “more info”)
-        val heavyLoaded = item.packageName.isNotBlank() || item.releaseDate != null
-        if (heavyLoaded) return
-
-        loadDetails(item)
-    }
-
-    private fun loadDetails(item: AppInfo) {
-        val k = keyOf(item)
-        if (_state.value.loadingKeys.contains(k)) return
+    fun openDetails(item: AppInfo) {
+        _state.update { it.copy(selected = item, selectedLoading = true, error = null) }
 
         viewModelScope.launch {
-            _state.update { it.copy(loadingKeys = it.loadingKeys + k, error = null) }
-
             runCatching { repo.loadDetails(item) }
                 .onSuccess { detailed ->
                     _state.update { st ->
-                        val newList = st.results.map { if (keyOf(it) == k) detailed else it }
-                        st.copy(results = newList, loadingKeys = st.loadingKeys - k)
+                        // also update list item if present
+                        val updatedList = st.results.map { if (sameItem(it, item)) detailed else it }
+                        st.copy(
+                            results = updatedList,
+                            selected = detailed,
+                            selectedLoading = false
+                        )
                     }
                 }
                 .onFailure { e ->
                     _state.update { st ->
                         st.copy(
-                            loadingKeys = st.loadingKeys - k,
+                            selectedLoading = false,
                             error = e.message ?: "Nu am putut încărca detaliile."
                         )
                     }
                 }
+        }
+    }
+
+    fun closeDetails() {
+        _state.update { it.copy(selected = null, selectedLoading = false) }
+    }
+
+    private fun sameItem(a: AppInfo, b: AppInfo): Boolean {
+        // stable identity:
+        // for F-Droid: packageName
+        // for APKMirror: downloadUrl
+        return (a.source == b.source) && when (a.source) {
+            "F-Droid" -> a.packageName.isNotBlank() && a.packageName == b.packageName
+            "APKMirror" -> !a.downloadUrl.isNullOrBlank() && a.downloadUrl == b.downloadUrl
+            else -> a.appName == b.appName
         }
     }
 }

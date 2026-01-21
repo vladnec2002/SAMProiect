@@ -71,6 +71,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.material3:material3:1.3.0")
     implementation("androidx.navigation:navigation-compose:2.8.3")
+    implementation("com.google.code.gson:gson:2.10.1")
+    implementation("com.squareup.retrofit2:converter-gson:2.11.0") // or your version
 
     // --- Lifecycle ---
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")

@@ -45,7 +45,6 @@ class AppRepositoryImpl @Inject constructor(
         "${item.source}:${if (item.packageName.isNotBlank()) item.packageName else (item.downloadUrl ?: item.appName)}"
 
     private fun formatDate(ts: Long): String {
-        // normalize seconds vs millis
         val millis = if (ts < 1_000_000_000_000L) ts * 1000L else ts
         return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(millis))
     }
@@ -64,13 +63,6 @@ class AppRepositoryImpl @Inject constructor(
             ?: iconMap.values.firstOrNull()
     }
 
-    /**
-     * In index-v2.json, icon file names are sometimes:
-     * - "org.app.png" (just the filename)
-     * - "icons-640/org.app.png" (already includes folder)
-     *
-     * This handles both safely.
-     */
     private fun fdroidIconUrl(fileName: String?): String? {
         if (fileName.isNullOrBlank()) return null
         return if (fileName.contains("/")) {
@@ -80,17 +72,12 @@ class AppRepositoryImpl @Inject constructor(
         }
     }
 
-    /**
-     * Pick the "latest" version for *release date* using `added`.
-     * (This is what you wanted instead of "last updated".)
-     */
     private fun latestByAdded(versions: Map<String, FdroidVersion>): Pair<String, FdroidVersion>? {
         if (versions.isEmpty()) return null
         val withAdded = versions.entries.filter { it.value.added != null }
         return if (withAdded.isNotEmpty()) {
             withAdded.maxByOrNull { it.value.added!! }?.let { it.key to it.value }
         } else {
-            // fallback if some packages have no "added"
             versions.entries.firstOrNull()?.let { it.key to it.value }
         }
     }
@@ -132,42 +119,32 @@ class AppRepositoryImpl @Inject constructor(
 
                     if (!matches) continue
 
-                    // ✅ icon (prefer localized, then fallback)
                     val iconFile = pickIconFile(meta.icon)
                     val iconUrl = fdroidIconUrl(iconFile?.name)
 
-                    // ✅ release-date source of truth: versions[*].added (pick latest by added)
-                    val latestAddedPair = latestByAdded(entry.versions)
-                    val latestKey = latestAddedPair?.first
-                    val latestFromIndex = latestAddedPair?.second
+                    val latestPair = latestByAdded(entry.versions)
+                    val latestFromIndex = latestPair?.second
 
-                    // Optional: use /api/v1/packages/{id} to get the suggested versionName/versionCode
-                    // (BUT note: this API does NOT give release dates, so added still comes from index-v2)
+                    // Optional: suggested version from /api/v1 (still no date there)
                     var chosenApiVersionCode: Long? = null
                     var versionName: String? = null
                     var versionCode: Int? = null
 
                     runCatching {
                         val app = fdroid.getApp(pkg)
-
                         val suggested = app.suggestedVersionCode
                         val chosen = app.packages.firstOrNull { it.versionCode != null && it.versionCode == suggested }
-                            ?: app.packages
-                                .filter { it.versionCode != null }
-                                .maxByOrNull { it.versionCode!! }
+                            ?: app.packages.filter { it.versionCode != null }.maxByOrNull { it.versionCode!! }
 
                         chosenApiVersionCode = chosen?.versionCode
                         versionName = chosen?.versionName
                         versionCode = chosen?.versionCode?.toInt()
                     }.onFailure {
-                        // fallback to index-v2 version info
                         versionName = latestFromIndex?.versionName
                         versionCode = latestFromIndex?.versionCode?.toInt()
                         Log.w("FDROID", "getApp($pkg) failed, fallback to index-v2")
                     }
 
-                    // ✅ RELEASE DATE FOR F-DROID:
-                    // try to match chosen versionCode -> index-v2 map key; else fallback to latest-by-added
                     val releaseDate =
                         chosenApiVersionCode
                             ?.toString()
@@ -175,18 +152,21 @@ class AppRepositoryImpl @Inject constructor(
                             ?.let(::formatDate)
                             ?: latestFromIndex?.added?.let(::formatDate)
 
-                    // If getApp chose a version but index-v2 key isn't versionCode-string, we still have
-                    // a good date fallback via latestFromIndex.added (the most recent release).
                     fdroidResults += AppInfo(
                         source = "F-Droid",
                         packageName = pkg,
                         appName = appName,
                         versionName = versionName ?: latestFromIndex?.versionName,
                         versionCode = versionCode ?: latestFromIndex?.versionCode?.toInt(),
-                        releaseDate = releaseDate, // ✅ IMPORTANT: from "added"
+                        releaseDate = releaseDate,
                         developer = meta.authorName,
                         downloadUrl = "https://f-droid.org/en/packages/$pkg/",
-                        iconUrl = iconUrl
+                        iconUrl = iconUrl,
+
+                        // ✅ nice extras already in index-v2
+                        summary = pickLocalized(meta.summary),
+                        license = meta.license,
+                        sourceCodeUrl = meta.sourceCode
                     )
 
                     if (fdroidResults.size >= fetchFdroid) break
@@ -229,7 +209,7 @@ class AppRepositoryImpl @Inject constructor(
                 if (out.size > before) apCount++
             }
 
-            // If one side didn’t have enough, fill remaining slots from the other side
+            // Fill remaining slots if needed
             if (out.size < limit) {
                 for (it in fdroidResults) {
                     if (out.size >= limit) break
@@ -249,13 +229,14 @@ class AppRepositoryImpl @Inject constructor(
     // ========================
     // LOAD DETAILS (heavy)
     // ========================
+
     override suspend fun loadDetails(item: AppInfo): AppInfo =
         withContext(Dispatchers.IO) {
 
             when (item.source) {
 
                 "F-Droid" -> {
-                    // already have relevant data (including releaseDate from index-v2 added)
+                    // Nothing extra to load anymore
                     item
                 }
 
@@ -263,23 +244,31 @@ class AppRepositoryImpl @Inject constructor(
                     val url = item.downloadUrl ?: return@withContext item
 
                     val details = runCatching {
-                        ApkMirrorScraper.loadDetailsSmart(url)
-                    }.getOrNull()
-
-                    if (details == null) return@withContext item
+                        ApkMirrorScraper.loadDetailsSmart(url, desiredVersionName = item.versionName)
+                    }.getOrNull() ?: return@withContext item
 
                     item.copy(
                         packageName = details.packageName.ifBlank { item.packageName },
+                        appName = if (details.appName.isNotBlank()) details.appName else item.appName,
                         versionName = details.versionName ?: item.versionName,
                         releaseDate = details.releaseDate ?: item.releaseDate,
                         developer = details.developer ?: item.developer,
-                        downloadUrl = details.downloadUrl ?: item.downloadUrl,
+                        downloadUrl = details.downloadUrl ?: item.downloadUrl, // acum e release page url
+                        fileSize = details.fileSize ?: item.fileSize,
+                        downloads = details.downloads ?: item.downloads,
+                        uploadedUtc = details.uploadedUtc ?: item.uploadedUtc,
                         minAndroid = details.minAndroid ?: item.minAndroid,
-                        architecture = details.architecture ?: item.architecture
+                        architecture = details.architecture ?: item.architecture,
+                        dpi = details.dpi ?: item.dpi,
+                        badges = if (details.badges.isNotEmpty()) details.badges else item.badges,
+                        variants = if (details.variants.isNotEmpty()) details.variants else item.variants
                     )
                 }
+
+
 
                 else -> item
             }
         }
+
 }
