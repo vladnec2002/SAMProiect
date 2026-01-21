@@ -22,14 +22,12 @@ fun SearchScreen(vm: SearchViewModel) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(
-                top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding(),
-                start = 16.dp,
-                end = 16.dp,
-                bottom = 16.dp
-            )
+            .systemBarsPadding()
+            .padding(16.dp)
     ) {
-        OutlinedTextField(
+
+
+    OutlinedTextField(
             value = state.query,
             onValueChange = vm::updateQuery,
             modifier = Modifier.fillMaxWidth(),

@@ -152,26 +152,42 @@ fun FullScreenDetailsDialog(
 
                     Spacer(Modifier.height(16.dp))
 
-                    DetailLine("Package", item.packageName)
-                    DetailLine("Developer", item.developer)
-                    DetailLine("Version", item.versionName)
-                    DetailLine("VersionCode", item.versionCode?.toString())
+                    when (item.source) {
+
+                        "APKMirror" -> {
+                            // ✅ DOAR ce vrei tu
+                            DetailLine("Developer", item.developer)
+                            DetailLine("Version", item.versionName)
+                            DetailLine("Uploaded (UTC)", item.uploadedUtc)
+                        }
+
+                        "F-Droid" -> {
+                            DetailLine("Package", item.packageName)
+                            DetailLine("Developer", item.developer)
+                            DetailLine("Version", item.versionName)
+                            DetailLine("VersionCode", item.versionCode?.toString())
+                        }
+
+                        else -> {
+                            DetailLine("Developer", item.developer)
+                            DetailLine("Version", item.versionName)
+                        }
+                    }
+
 
                     if (item.source == "APKMirror") {
-                        DetailLine("Uploaded", item.releaseDate)
-                        DetailLine("Uploaded UTC", item.uploadedUtc)
-                        DetailLine("File size", item.fileSize)
-                        DetailLine("Downloads", item.downloads)
 
                         DetailLine("Min Android", item.minAndroid)
                         DetailLine("Architecture", item.architecture)
                         DetailLine("DPI", item.dpi)
 
                         if (item.badges.isNotEmpty()) {
-                            Spacer(Modifier.height(8.dp))
-                            Text("Badges:", style = MaterialTheme.typography.titleMedium)
-                            Text(item.badges.joinToString(", "), style = MaterialTheme.typography.bodyMedium)
+                            Text("Badges:")
+                            Text(item.badges.joinToString(", "))
                         }
+
+                        // variants rămân
+
 
                         if (item.variants.isNotEmpty()) {
                             Spacer(Modifier.height(12.dp))
@@ -179,23 +195,30 @@ fun FullScreenDetailsDialog(
 
                             item.variants.forEach { v ->
                                 Spacer(Modifier.height(8.dp))
-                                Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium) {
+                                Surface(
+                                    tonalElevation = 1.dp,
+                                    shape = MaterialTheme.shapes.medium
+                                ) {
                                     Column(Modifier.padding(12.dp)) {
                                         DetailLine("Variant", v.variantName)
-                                        if (v.badges.isNotEmpty()) DetailLine("Badges", v.badges.joinToString(", "))
+                                        if (v.badges.isNotEmpty())
+                                            DetailLine("Badges", v.badges.joinToString(", "))
                                         DetailLine("Arch", v.architecture)
                                         DetailLine("Min Android", v.minAndroid)
                                         DetailLine("DPI", v.dpi)
 
                                         v.variantPageUrl?.let { u ->
                                             Spacer(Modifier.height(6.dp))
-                                            TextButton(onClick = { onOpen(u) }) { Text("Open variant page") }
+                                            TextButton(onClick = { onOpen(u) }) {
+                                                Text("Open variant page")
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
+
                     else if (item.source == "F-Droid") {
                         DetailLine("Release date", item.releaseDate)
                         DetailLine("Summary", item.summary)
